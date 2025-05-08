@@ -92,7 +92,7 @@ except ImportError:
     logger.warning("dotenv 패키지가 설치되어 있지 않습니다. 환경 변수를 직접 설정해주세요.")
 
 # Gemini API 설정
-DEFAULT_GEMINI_API_KEY = "AIzaSyDLe9f5i3AlKZp4eX-U8Xgop7GiO0y_Qzc"
+DEFAULT_GEMINI_API_KEY = ""
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", DEFAULT_GEMINI_API_KEY)
 if GEMINI_API_KEY == DEFAULT_GEMINI_API_KEY:
     logger.info("환경 변수에서 GEMINI_API_KEY를 찾을 수 없어 기본값을 사용합니다.")
