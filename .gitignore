@@ -1,0 +1,49 @@
+# Python 기본 패턴
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 로그 파일
+*.log
+
+# 환경 설정 파일
+.env
+.env.bak
+
+# 디버그 및 임시 파일
+directory.txt
+search_results_debug.html
+
+# 테스트 스크립트
+test5.py
+
+# 가상 환경
+venv/
+virtualenv/
+
+# IDE 설정
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS 생성 파일
+.DS_Store
+Thumbs.db
