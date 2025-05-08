@@ -17,7 +17,7 @@ import google.generativeai as genai
 logger = logging.getLogger(__name__)
 
 # Gemini API 관련 상수
-DEFAULT_GEMINI_API_KEY = "AIzaSyDLe9f5i3AlKZp4eX-U8Xgop7GiO0y_Qzc"
+DEFAULT_GEMINI_API_KEY = ""
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", DEFAULT_GEMINI_API_KEY)
 if not GEMINI_API_KEY or GEMINI_API_KEY == "":
     logger.warning("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다. 기본값을 사용합니다.")
