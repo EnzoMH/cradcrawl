@@ -165,176 +165,62 @@ class G2BNavigator:
             return False
     
     async def _close_popups(self):
-        """팝업창 닫기"""
+        """팝업창 닫기 (성공적인 부분만 유지)"""
         try:
-            # 모든 팝업창 탐색 및 닫기
             logger.info("팝업창 닫기 시도 중...")
             
-            # 메인 윈도우 핸들 저장
-            main_window = self.driver.current_window_handle
+            # 1. 알림창(alert) 확인
+            try:
+                alert = self.driver.switch_to.alert
+                alert_text = alert.text
+                logger.info(f"알림창 감지: {alert_text}")
+                alert.accept()
+                logger.info("알림창 확인 완료")
+            except Exception:
+                pass  # 알림창이 없는 경우 무시
             
-            # 모든 윈도우 핸들 가져오기
+            # 2. 팝업 윈도우 닫기 (CrawlerBase의 코드 활용)
+            current_window = self.driver.current_window_handle
             all_windows = self.driver.window_handles
             
-            # 팝업 윈도우 닫기
-            popup_count = 0
             for window in all_windows:
-                if window != main_window:
+                if window != current_window:
                     self.driver.switch_to.window(window)
                     self.driver.close()
-                    popup_count += 1
-                    logger.info(f"윈도우 팝업 닫기 성공 ({popup_count})")
+                    logger.info("팝업 윈도우 닫기 완료")
             
-            if popup_count > 0:
-                logger.info(f"총 {popup_count}개의 윈도우 팝업을 닫았습니다.")
+            self.driver.switch_to.window(current_window)
             
-            # 메인 윈도우로 복귀
-            self.driver.switch_to.window(main_window)
-            
-            # 페이지 내 팝업창 닫기 (반복적으로 처리)
-            closed_count = 0
-            max_attempts = 5  # 최대 시도 횟수
-            
-            for attempt in range(max_attempts):
-                # 페이지 안정화를 위한 짧은 대기
-                await asyncio.sleep(0.3)
-                
-                # 1. 공지사항 팝업 (우선적으로 처리)
-                try:
-                    notice_close = self.driver.find_element(By.XPATH, "//div[contains(@class,'w2window')]//button[contains(@class,'w2window_close')]")
-                    if notice_close.is_displayed() and notice_close.is_enabled():
-                        button_id = notice_close.get_attribute('id') or "공지사항 팝업"
-                        logger.info(f"공지사항 팝업 닫기 버튼 발견 (ID: {button_id})")
-                        notice_close.click()
-                        closed_count += 1
-                        logger.info(f"공지사항 팝업 닫기 성공")
-                        await asyncio.sleep(0.5)
-                        continue  # 다음 반복으로 (DOM이 변경되었을 수 있음)
-                except Exception:
-                    # 공지사항 팝업이 없거나 닫기 실패
-                    pass
-                
-                # 2. 가장 일반적인 닫기 버튼 찾기 (한 번에 하나씩 처리)
-                close_button_found = False
-                
-                # 주요 셀렉터 순서대로 시도
-                selectors = [
-                    # 가장 흔한 패턴부터 시도
-                    "[id*='poupR'][id*='_close']",  # 나라장터 특정 패턴
-                    "[id*='poup'][id*='Close']",    # 팝업 닫기 버튼
-                    "[id$='_close']",               # ~_close로 끝나는 ID
-                    ".w2window_close",              # 일반적인 클래스
-                    "[aria-label='창닫기']",         # 접근성 속성
-                    ".close",                       # 범용 닫기 클래스
-                    ".popup_close",                 # 팝업 닫기 클래스
-                    "input[type='button'][value='닫기']", # 닫기 버튼 값
-                    "button:contains('닫기')"        # 닫기 텍스트가 있는 버튼
-                ]
-                
-                for selector in selectors:
-                    try:
-                        buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                        for button in buttons:
-                            if button.is_displayed() and button.is_enabled():
-                                button_id = button.get_attribute('id') or "알 수 없음"
-                                logger.info(f"팝업 닫기 버튼 발견 (ID: {button_id}), 클릭 시도...")
-                                button.click()
-                                closed_count += 1
-                                logger.info(f"페이지 내 팝업창 닫기 성공: {button_id}")
-                                await asyncio.sleep(0.5)
-                                close_button_found = True
-                                break  # 한 버튼을 성공적으로 클릭했으면 중단
-                        
-                        if close_button_found:
-                            break  # 버튼을 찾았으면 셀렉터 루프 중단
-                    except Exception as e:
-                        # 특정 셀렉터로 찾기 실패, 다음 셀렉터 시도
-                        logger.debug(f"셀렉터 '{selector}' 사용 버튼 찾기 실패: {str(e)}")
-                        continue
-                
-                # 버튼을 하나 클릭했으면 다음 반복으로 (DOM이 변경되었을 수 있음)
-                if close_button_found:
-                    continue
-                
-                # 3. iframe 내부 팝업 처리 (한 번에 하나의 iframe만 처리)
-                iframe_processed = False
-                iframe_elements = self.driver.find_elements(By.TAG_NAME, "iframe")
-                
-                for iframe in iframe_elements:
-                    try:
-                        iframe_id = iframe.get_attribute("id") or "알 수 없음"
-                        if iframe.is_displayed():
-                            logger.debug(f"iframe 확인: {iframe_id}")
-                            self.driver.switch_to.frame(iframe)
-                            
-                            # iframe 내부의 닫기 버튼 찾기
-                            for selector in selectors:
-                                try:
-                                    iframe_buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                                    for button in iframe_buttons:
-                                        if button.is_displayed() and button.is_enabled():
-                                            button_id = button.get_attribute('id') or "iframe 내부"
-                                            logger.info(f"iframe 내부 팝업 닫기 버튼 발견 (ID: {button_id})")
-                                            button.click()
-                                            closed_count += 1
-                                            logger.info(f"iframe 내부 팝업창 닫기 성공: {button_id}")
-                                            iframe_processed = True
-                                            await asyncio.sleep(0.5)
-                                            break
-                                        
-                                    if iframe_processed:
-                                        break
-                                except Exception:
-                                    continue
-                            
-                            # 기본 컨텐츠로 복귀
-                            self.driver.switch_to.default_content()
-                            
-                            # iframe 내부에서 버튼을 클릭했으면 중단
-                            if iframe_processed:
-                                break
-                    except Exception as iframe_err:
-                        logger.debug(f"iframe 접근 실패 (무시): {str(iframe_err)}")
-                        # iframe 처리 중 오류 발생 시 기본 컨텐츠로 복귀
-                        self.driver.switch_to.default_content()
-                
-                # iframe 내부에서 버튼을 클릭했으면 다음 반복으로
-                if iframe_processed:
-                    continue
-                
-                # 4. 더이상 닫을 팝업이 없는 경우
-                if not close_button_found and not iframe_processed:
-                    # ESC 키를 눌러 혹시 남은 팝업 닫기 시도
-                    try:
-                        actions = ActionChains(self.driver)
-                        actions.send_keys(Keys.ESCAPE).perform()
-                        await asyncio.sleep(0.5)
-                        logger.debug("ESC 키 입력으로 남은 팝업 닫기 시도")
-                    except Exception as e:
-                        logger.debug(f"ESC 키 입력 실패 (무시): {str(e)}")
-                    
-                    # 더 이상 팝업이 없으면 반복 종료
-                    break
-            
-            # 최종 팝업 닫기 결과 출력
-            if closed_count > 0:
-                logger.info(f"총 {closed_count}개의 페이지 내 팝업창을 닫았습니다.")
-            else:
-                logger.info("페이지 내 팝업창이 발견되지 않았습니다.")
-            
-            # 메인 컨텐츠 영역 클릭해서 포커스 주기
+            # 3. 공지사항 팝업 닫기 (성공했던 방식만 유지)
             try:
-                main_content = self.driver.find_element(By.ID, "container")
-                main_content.click()
-                logger.debug("메인 컨텐츠 영역 포커스 설정")
-            except Exception:
-                try:
-                    # 대체 방법: 본문 영역 클릭
-                    body = self.driver.find_element(By.TAG_NAME, "body")
-                    body.click()
-                    logger.debug("본문 영역 포커스 설정")
-                except Exception:
-                    pass
+                # ID 패턴으로 공지사항 팝업 찾기
+                popup_close_buttons = self.driver.find_elements(By.CSS_SELECTOR, 
+                                                            "[id*='poupR'][id*='close']")
                 
+                for button in popup_close_buttons:
+                    try:
+                        button_id = button.get_attribute("id")
+                        logger.info(f"공지사항 팝업 닫기 버튼 발견 (ID: {button_id})")
+                        button.click()
+                        logger.info("공지사항 팝업 닫기 성공")
+                        await asyncio.sleep(0.5)  # 잠시 대기
+                    except Exception as click_err:
+                        logger.debug(f"버튼 클릭 실패, 다음 버튼 시도: {str(click_err)}")
+                        continue
+            except Exception as popup_err:
+                logger.debug(f"공지사항 팝업 처리 중 오류 (무시): {str(popup_err)}")
+            
+            # 4. ESC 키 입력으로 남은 팝업 닫기 시도
+            try:
+                actions = ActionChains(self.driver)
+                actions.send_keys(Keys.ESCAPE).perform()
+                logger.debug("ESC 키 입력으로 남은 팝업 닫기 시도")
+            except Exception:
+                pass
+            
+            logger.info("페이지 내 팝업창이 처리되었습니다.")
+            return True
+            
         except Exception as e:
-            logger.warning(f"팝업창 닫기 중 오류 (계속 진행): {str(e)}") 
+            logger.warning(f"팝업 처리 중 오류 (계속 진행): {str(e)}")
+            return True  # 팝업 처리에 실패해도 계속 진행

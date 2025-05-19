@@ -8,6 +8,7 @@ import asyncio
 import logging
 import traceback
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 from selenium import webdriver
@@ -18,11 +19,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import NoSuchElementException
-import time
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
 # 로거 설정
-logger = logging.getLogger("backend.crawler")
+logger = logging.getLogger("backend.crawler.base")
 
 # 결과 저장 경로
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -31,7 +31,6 @@ RESULTS_DIR.mkdir(exist_ok=True)
 class CrawlerBase:
     """모든 크롤러의 기본 클래스"""
     
-    """ 크롤러 초기화 """
     def __init__(self, headless: bool = False):
         """
         크롤러 초기화
@@ -42,8 +41,8 @@ class CrawlerBase:
         self.driver = None
         self.wait = None
         self.headless = headless
+        self.current_page = None  # 페이지 상태 추적
     
-    """ 크롤러 초기화 """
     async def initialize(self):
         """크롤러 초기화 및 웹드라이버 설정"""
         try:
@@ -66,6 +65,9 @@ class CrawlerBase:
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--window-size=1920,1080')
             chrome_options.add_argument('--disable-popup-blocking')
+            chrome_options.add_argument('--lang=ko_KR.UTF-8')
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option("useAutomationExtension", False)
             chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
             
             # 웹드라이버 초기화
@@ -105,36 +107,40 @@ class CrawlerBase:
             finally:
                 self.driver = None
                 self.wait = None
+                self.current_page = None
     
     """ 팝업창 닫기 """
-    async def _close_popups(self):
-        """팝업창 닫기"""
+    async def close_popups(self):
+        """팝업창 닫기 (통합 버전)"""
         try:
             # 모든 팝업창 탐색 및 닫기
             logger.info("팝업창 닫기 시도 중...")
             
-            # 메인 윈도우 핸들 저장
-            main_window = self.driver.current_window_handle
+            # 1. 알림창(alert) 확인
+            try:
+                alert = self.driver.switch_to.alert
+                alert_text = alert.text
+                logger.info(f"알림창 감지: {alert_text}")
+                alert.accept()
+                logger.info("알림창 확인 완료")
+            except Exception:
+                pass  # 알림창이 없는 경우 무시
             
-            # 모든 윈도우 핸들 가져오기
+            # 2. 팝업 윈도우 닫기
+            current_window = self.driver.current_window_handle
             all_windows = self.driver.window_handles
             
-            # 팝업 윈도우 닫기
             popup_count = 0
             for window in all_windows:
-                if window != main_window:
+                if window != current_window:
                     self.driver.switch_to.window(window)
                     self.driver.close()
                     popup_count += 1
                     logger.info(f"윈도우 팝업 닫기 성공 ({popup_count})")
             
-            if popup_count > 0:
-                logger.info(f"총 {popup_count}개의 윈도우 팝업을 닫았습니다.")
+            self.driver.switch_to.window(current_window)
             
-            # 메인 윈도우로 복귀
-            self.driver.switch_to.window(main_window)
-            
-            # 나라장터 특정 팝업창 닫기 (공지사항 등)
+            # 3. 나라장터 특정 팝업창 닫기 (공지사항 등)
             try:
                 # 공지사항 팝업 닫기 (가장 일반적인 팝업)
                 notice_close = WebDriverWait(self.driver, 3).until(
@@ -144,35 +150,12 @@ class CrawlerBase:
                 logger.info("공지사항 팝업 닫기 성공")
                 await asyncio.sleep(0.5)
             except Exception:
-                logger.debug("공지사항 팝업이 없거나 닫기 실패")
+                pass
             
-            # 일반적인 닫기 버튼 선택자
-            popup_close_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".w2window_close, .close, [aria-label='창닫기'], .popup_close")
+            # 4. 다양한 닫기 버튼 찾기 및 클릭
+            popup_close_buttons = self.driver.find_elements(By.CSS_SELECTOR, 
+                ".w2window_close, .close, [aria-label='창닫기'], .popup_close, [id*='poupR'][id$='_close']")
             
-            # 나라장터 특정 공지사항 팝업 닫기 버튼
-            popup_close_buttons.extend(self.driver.find_elements(By.XPATH, "//button[contains(@id, 'poupR') and contains(@id, '_close')]"))
-            popup_close_buttons.extend(self.driver.find_elements(By.XPATH, "//button[contains(@class, 'w2window_close_acc') and @aria-label='창닫기']"))
-            
-            # ID 패턴 기반 닫기 버튼 찾기
-            popup_close_buttons.extend(self.driver.find_elements(By.CSS_SELECTOR, "[id*='poupR'][id$='_close']"))
-            
-            # iframe 내부 팝업 처리
-            iframe_elements = self.driver.find_elements(By.TAG_NAME, "iframe")
-            for iframe in iframe_elements:
-                try:
-                    iframe_id = iframe.get_attribute("id")
-                    if iframe_id:
-                        logger.debug(f"iframe 확인: {iframe_id}")
-                        self.driver.switch_to.frame(iframe)
-                        iframe_close_buttons = self.driver.find_elements(By.CSS_SELECTOR, ".close, .popup_close, [aria-label='창닫기']")
-                        for btn in iframe_close_buttons:
-                            popup_close_buttons.append(btn)
-                        self.driver.switch_to.default_content()
-                except Exception as iframe_err:
-                    logger.debug(f"iframe 접근 실패 (무시): {str(iframe_err)}")
-                    self.driver.switch_to.default_content()
-            
-            # 찾은 모든 버튼 클릭 시도
             closed_count = 0
             for button in popup_close_buttons:
                 try:
@@ -181,40 +164,40 @@ class CrawlerBase:
                     button.click()
                     closed_count += 1
                     logger.info(f"페이지 내 팝업창 닫기 성공: {button_id}")
-                    await asyncio.sleep(0.5)  # 약간의 지연
-                except Exception as e:
-                    logger.debug(f"팝업 버튼 클릭 실패 (무시): {str(e)}")
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    pass
             
-            if closed_count > 0:
-                logger.info(f"총 {closed_count}개의 페이지 내 팝업창을 닫았습니다.")
-            
+            # 5. ESC 키를 눌러 혹시 남은 팝업 닫기 시도
             try:
-                # ESC 키를 눌러 혹시 남은 팝업 닫기 시도
                 actions = ActionChains(self.driver)
                 actions.send_keys(Keys.ESCAPE).perform()
                 await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.debug(f"ESC 키 입력 실패 (무시): {str(e)}")
-            
-            # 메인 컨텐츠 영역 클릭해서 포커스 주기
-            try:
-                main_content = self.driver.find_element(By.ID, "container")
-                main_content.click()
-                logger.debug("메인 컨텐츠 영역 포커스 설정")
             except Exception:
-                try:
-                    # 대체 방법: 본문 영역 클릭
-                    body = self.driver.find_element(By.TAG_NAME, "body")
-                    body.click()
-                    logger.debug("본문 영역 포커스 설정")
-                except Exception:
-                    pass
+                pass
                 
         except Exception as e:
             logger.warning(f"팝업창 닫기 중 오류 (계속 진행): {str(e)}")
+            
+    def set_page_state(self, page_name):
+        """현재 페이지 상태 설정"""
+        self.current_page = page_name
+        logger.info(f"페이지 상태 변경: {page_name}")
+        
+    def is_on_page(self, page_name):
+        """현재 페이지가 지정된 페이지인지 확인"""
+        return self.current_page == page_name
     
-    """ 상세 페이지 내 팝업 처리 """
-    def _handle_detail_page_popups(self):
+    def __del__(self):
+        """웹드라이버 종료 및 리소스 정리"""
+        if hasattr(self, 'driver') and self.driver:
+            try: 
+                self.driver.quit()
+                logger.info("웹드라이버 종료 완료")
+            except:
+                pass
+    
+
         """상세 페이지 내 팝업 처리"""
         try:
             # 알림창(alert) 확인

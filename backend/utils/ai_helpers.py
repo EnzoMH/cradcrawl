@@ -17,11 +17,9 @@ import google.generativeai as genai
 logger = logging.getLogger(__name__)
 
 # Gemini API 관련 상수
-DEFAULT_GEMINI_API_KEY = "AIzaSyDLe9f5i3AlKZp4eX-U8Xgop7GiO0y_Qzc"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", DEFAULT_GEMINI_API_KEY)
-if not GEMINI_API_KEY or GEMINI_API_KEY == "":
-    logger.warning("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다. 기본값을 사용합니다.")
-    GEMINI_API_KEY = DEFAULT_GEMINI_API_KEY
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    logger.warning("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다. AI 기능을 사용할 수 없습니다.")
 else:
     logger.info(f"AI 유틸리티에서 GEMINI_API_KEY를 로드했습니다.")
 
@@ -66,6 +64,7 @@ class AIModelManager:
             # 초기화 실패시 오류를 발생시키지 않고 로그만 남김
             logger.debug(traceback.format_exc())
     
+    
     async def extract_with_gemini(self, text_content: str, prompt_template: str) -> str:
         """
         텍스트 콘텐츠를 Gemini API에 전달하여 정보 추출
@@ -88,7 +87,7 @@ class AIModelManager:
                 logger.warning(f"텍스트가 너무 길어 일부를 생략했습니다: {len(text_content)} -> {max_length}")
             
             # 프롬프트 구성
-            prompt = prompt_template.format(content=text_content)
+            prompt = prompt_template.format(text_content=text_content)  # 이 줄을 수정
             
             # 응답 생성
             response = self.gemini_model.generate_content(prompt)
@@ -122,7 +121,7 @@ class AIModelManager:
             
             # 프롬프트 구성
             prompt = f"""
-            당신은 입찰공고명과 검색어 사이의 실제 연관성을 판단하는 AI 전문가입니다.
+            당신은 입찰공고명과 검색어 사이의 실제 연관성을 판단하는 AI 어시스턴트입니다.
             
             입찰공고명: {title}
             검색어: {keyword}
@@ -134,6 +133,7 @@ class AIModelManager:
             2. 같은 의미를 가진 유사어도 연관성이 있다고 판단합니다 (예: '인공지능'과 'AI', '머신러닝'과 'ML' 등).
             3. 제품명이나 회사명에 우연히 검색어의 일부가 포함된 경우는 연관이 없습니다 (예: 'AI'가 'MAIN', 'TRAIN'의 일부로 포함된 경우).
             4. 검색어가 약어인 경우 전체 단어도 확인합니다 (예: 'AI'는 'Artificial Intelligence'와 연관).
+            
             
             결과는 아래 형식으로 출력해주세요:
             {{
@@ -269,7 +269,7 @@ async def _init_gemini_model():
         logger.debug(traceback.format_exc())
         return None
 
-async def extract_with_gemini_text(text_content: str, prompt_template: str) -> Optional[str]:
+async def extract_with_gemini_text(text_content: str, prompt_template: str) -> str:
     """
     Gemini API를 사용하여 텍스트에서 정보 추출
     

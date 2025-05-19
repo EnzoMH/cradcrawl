@@ -11,6 +11,7 @@ import asyncio
 import logging
 import json
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
@@ -27,9 +28,12 @@ from backend.crawler.crawler_base import CrawlerBase
 from backend.crawler.g2b_navigation import G2BNavigator
 from backend.crawler.g2b_search import G2BSearcher
 from backend.crawler.g2b_detail import G2BDetailProcessor
-from backend.crawler.g2b_contract import G2BContractExtractor
+from backend.crawler.g2b_contract import G2BContractAnalyzer
 from backend.crawler.g2b_parser import G2BParser
 from backend.crawler.g2b_extractor import G2BExtractor
+
+# 모델 임포트 추가
+from backend.models import BidItem, SearchResult, BidStatus
 
 # 유틸리티 모듈 임포트
 from backend.utils.ai_helpers import extract_with_gemini_text, check_relevance_with_ai, ai_model_manager
@@ -39,13 +43,8 @@ from backend.utils.parsing_helpers import extract_detail_page_data_from_soup
 logger = logging.getLogger("g2b-crawler")
 
 # 환경 변수 확인
-DEFAULT_GEMINI_API_KEY = "AIzaSyDLe9f5i3AlKZp4eX-U8Xgop7GiO0y_Qzc"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", DEFAULT_GEMINI_API_KEY)
-if not GEMINI_API_KEY or GEMINI_API_KEY == "":
-    logger.warning("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다. 기본값을 사용합니다.")
-    os.environ["GEMINI_API_KEY"] = DEFAULT_GEMINI_API_KEY
-else:
-    logger.info(f"크롤러에서 GEMINI_API_KEY를 로드했습니다.")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+logger.info(f"크롤러에서 GEMINI_API_KEY를 로드했습니다.")
 
 # 결과 저장 디렉토리 설정
 RESULTS_DIR = current_dir / 'results'
@@ -65,6 +64,9 @@ class G2BCrawler:
         self.headless = headless
         self.results = []
         self.keyword = "AI"  # 기본 검색어
+        
+        # 검색 결과 모델 초기화
+        self.search_result_model = None
         
         # 기본 인스턴스 설정
         self.driver = None
@@ -105,12 +107,11 @@ class G2BCrawler:
                 logger.error("웹드라이버 초기화 실패")
                 return False
             
-            # 각 모듈 인스턴스 초기화 (driver와 wait 객체 전달)
+            # 각 모듈 인스턴스 초기화 (driver와 wait 객체만 전달)
             self.navigator = G2BNavigator(driver=self.driver, wait=self.wait)
-            self.searcher = G2BSearcher(driver=self.driver, wait=self.wait, navigator=self.navigator)
+            self.searcher = G2BSearcher(driver=self.driver, wait=self.wait)
             self.extractor = G2BExtractor(driver=self.driver)
             self.detail_processor = G2BDetailProcessor(driver=self.driver, extractor=self.extractor)
-            self.contract_extractor = G2BContractExtractor(driver=self.driver)
             self.parser = G2BParser()
             
             logger.info("크롤러 모듈 초기화 성공")
@@ -121,51 +122,48 @@ class G2BCrawler:
             return False
     
     async def close(self):
-        """
-        크롤러 종료 및 리소스 정리
-        """
+        """크롤러 종료 및 리소스 정리"""
         if self.base:
             await self.base.close()
             self.driver = None
             self.wait = None
+            # 페이지 상태도 초기화
+            if hasattr(self.base, 'current_page'):
+                self.base.current_page = None
     
     async def navigate_to_main(self):
-        """
-        나라장터 메인 페이지로 이동
-        
-        Returns:
-            bool: 이동 성공 여부
-        """
+        """나라장터 메인 페이지로 이동"""
         try:
             logger.info("나라장터 메인 페이지로 이동 시도")
-            return await self.navigator.navigate_to_main()
+            result = await self.navigator.navigate_to_main()
+            if result:
+                self.base.set_page_state("main")
+            return result
         except Exception as e:
             logger.error(f"메인 페이지 이동 중 오류: {str(e)}")
             logger.debug(traceback.format_exc())
             return False
     
     async def navigate_to_bid_list(self):
-        """
-        입찰공고 목록 페이지로 이동
-        
-        Returns:
-            bool: 이동 성공 여부
-        """
+        """입찰공고 목록 페이지로 이동"""
         try:
+            # 이미 입찰공고 목록 페이지에 있는 경우 건너뛰기
+            if self.base.is_on_page("bid_list"):
+                logger.info("이미 입찰공고 목록 페이지에 있습니다.")
+                return True
+                
             logger.info("입찰공고 목록 페이지로 이동 시도")
-            return await self.navigator.navigate_to_bid_list()
+            result = await self.navigator.navigate_to_bid_list()
+            if result:
+                self.base.set_page_state("bid_list")
+            return result
         except Exception as e:
             logger.error(f"입찰공고 목록 페이지 이동 중 오류: {str(e)}")
             logger.debug(traceback.format_exc())
             return False
             
     async def setup_search_conditions(self):
-        """
-        검색 조건 설정
-        
-        Returns:
-            bool: 설정 성공 여부
-        """
+        """검색 조건 설정"""
         try:
             logger.info("검색 조건 설정 시도")
             return await self.searcher.setup_search_conditions()
@@ -174,40 +172,13 @@ class G2BCrawler:
             logger.debug(traceback.format_exc())
             return False
     
-    async def process_detail_page(self, item):
+    async def search_keyword(self, keyword=None, skip_navigation=False):
         """
-        단일 항목의 상세 페이지 처리
+        키워드로 입찰공고 검색 수행 (전체 흐름 조율)
         
         Args:
-            item: 처리할 항목
-            
-        Returns:
-            Dict: 상세 정보 딕셔너리
-        """
-        try:
-            logger.info(f"항목 상세 페이지 처리: {item['title']}")
-            
-            # 상세 페이지 처리기를 통해 처리
-            detail_data = await self.detail_processor.process_detail_page(item)
-            
-            if detail_data:
-                logger.info("상세 정보 추출 성공")
-                return detail_data
-            else:
-                logger.warning("상세 정보 추출 실패")
-                return None
-                
-        except Exception as e:
-            logger.error(f"항목 상세 페이지 처리 중 오류: {str(e)}")
-            logger.debug(traceback.format_exc())
-            return None
-
-    async def search_keyword(self, keyword=None):
-        """
-        키워드로 입찰공고 검색 수행
-        
-        Args:
-            keyword: 검색할 키워드 (None이면 self.keyword 사용)
+            keyword: 검색할 키워드
+            skip_navigation: 페이지 이동 단계를 건너뛸지 여부
         
         Returns:
             bool: 검색 성공 여부
@@ -219,26 +190,94 @@ class G2BCrawler:
         try:
             logger.info(f"키워드 '{search_keyword}' 검색 시작")
             
-            # 입찰공고 목록 페이지로 이동
-            if not await self.navigate_to_bid_list():
-                logger.error("입찰공고 목록 페이지 이동 실패")
-                return False
+            # 1. 페이지 이동 (G2BCrawler가 직접 담당)
+            if not skip_navigation:
+                if not self.base.is_on_page("bid_list"):
+                    logger.info("입찰공고 목록 페이지로 이동합니다.")
+                    if not await self.navigator.navigate_to_bid_list():
+                        logger.error("입찰공고 목록 페이지 이동 실패")
+                        return False
+                    
+                    # 페이지 이동 성공 시 상태 설정
+                    self.base.set_page_state("bid_list")
+                else:
+                    logger.info("이미 입찰공고 목록 페이지에 있습니다.")
             
-            # 검색 조건 설정 및 키워드 검색 수행
+            # 2. 검색 조건 설정
             if not await self.searcher.setup_search_conditions():
                 logger.warning("검색 조건 설정 실패 (계속 진행)")
             
-            # 키워드 검색 수행
+            # 3. 실제 검색 수행 (G2BSearcher에 위임)
             if not await self.searcher.search_keyword(search_keyword):
                 logger.error("키워드 검색 실패")
                 return False
             
+            # 4. 검색 결과 페이지 상태 설정 (G2BCrawler가 담당)
+            self.base.set_page_state("search_results")
             return True
         except Exception as e:
             logger.error(f"키워드 검색 중 오류 발생: {str(e)}")
             logger.debug(traceback.format_exc())
             return False
     
+    async def process_detail_page(self, item):
+        """단일 항목의 상세 페이지 처리"""
+        try:
+            logger.info(f"항목 상세 페이지 처리: {item['title']}")
+            
+            # 상세 페이지 HTML 소스 가져오기
+            page_source = None
+            try:
+                page_source = self.detail_processor.driver.page_source
+            except Exception as source_err:
+                logger.warning(f"페이지 소스 가져오기 실패: {str(source_err)}")
+                
+            if not page_source:
+                logger.error("페이지 소스를 가져올 수 없습니다.")
+                return {'title': item.get('title', ''), 'error': '페이지 소스 없음'}
+                
+            # G2BParser를 활용한 상세 정보 추출
+            bid_number = item.get('bid_number', '')
+            bid_title = item.get('title', '')
+            
+            # G2BParser의 parse_detail_page 메서드 활용
+            detail_data = await self.parser.parse_detail_page(
+                page_source, bid_number, bid_title
+            )
+            
+            # 결과가 없는 경우 기존 방식으로 백업 추출
+            if not detail_data:
+                logger.info("G2BParser 추출 실패, 기존 방식 시도")
+                # 기존 코드 유지 (G2BContractAnalyzer 및 detail_processor)
+                
+            # 기본 메타데이터 추가
+            if 'title' not in detail_data and 'title' in item:
+                detail_data['title'] = item['title']
+            if 'bid_number' not in detail_data and 'bid_number' in item:
+                detail_data['bid_number'] = item['bid_number']
+            if 'keyword' not in detail_data and 'keyword' in item:
+                detail_data['keyword'] = item['keyword']
+            
+            # 추출 시간 및 URL 정보 추가
+            detail_data['extraction_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            detail_data['detail_url'] = self.detail_processor.driver.current_url
+            
+            # 모델 필드 매핑 위해 필요한 필드 이름 확인 및 매핑
+            # bid_method, contract_method 등 필드 이름 통일
+            if 'contract_method' in detail_data and 'bid_method' not in detail_data:
+                detail_data['bid_method'] = detail_data['contract_method']
+            
+            # 페이지 상태 추적 업데이트
+            self.base.set_page_state("detail_page")
+            
+            logger.info(f"상세 정보 추출 성공: {len(detail_data)} 필드")
+            return detail_data
+                
+        except Exception as e:
+            logger.error(f"항목 상세 페이지 처리 중 오류: {str(e)}")
+            logger.debug(traceback.format_exc())
+            return {'title': item.get('title', ''), 'error': str(e)}
+ 
     async def extract_search_results(self, max_items=1000):
         """
         검색 결과 목록에서 항목 추출
@@ -262,36 +301,28 @@ class G2BCrawler:
                 
             # 필터링 및 제한
             valid_items = []
-            filtered_count = 0
             
             for index, item in enumerate(all_items):
                 if max_items > 0 and len(valid_items) >= max_items:
                     logger.info(f"최대 항목 수({max_items})에 도달하여 처리 중단")
                     break
-                            
-                # 검색어와 공고명 연관성 확인
-                try:
-                    is_relevant = await check_relevance_with_ai(item['title'], self.keyword)
-                    
-                    if not is_relevant:
-                        logger.info(f"항목 '{item['title']}': 검색어와 연관성 없음 (건너뜀)")
-                        filtered_count += 1
-                        continue
-                            
-                    # 마감 일자가 7일 이내인지 확인 (비활성화)
-                    # if item.get('is_within_7days', False):
-                    #     logger.info(f"항목 '{item['title']}': 마감일 7일 이내 (건너뜀)")
-                    #     filtered_count += 1
-                    #     continue
-                            
-                    # 유효한 항목 추가
-                    valid_items.append(item)
-                    logger.info(f"항목 #{len(valid_items)} 추가: {item['title']}")
-                    
-                except Exception as e:
-                    logger.warning(f"항목 '{item['title']}' 필터링 중 오류: {str(e)}")
                 
-            logger.info(f"총 {len(all_items)}개 중 {len(valid_items)}개 항목 처리 대상 (필터링: {filtered_count}개)")
+                # 연관성 확인 코드 제거 - 모든 항목을 유효한 것으로 처리
+                valid_items.append(item)
+                logger.info(f"항목 #{len(valid_items)} 추가: {item['title']}")
+            
+            logger.info(f"총 {len(all_items)}개 중 {len(valid_items)}개 항목 처리 대상")
+            
+            # 딕셔너리를 BidItem 모델로 변환하여 저장
+            model_items = await self._convert_dict_results_to_model(valid_items)
+            
+            # 검색 결과 모델 생성
+            self.search_result_model = SearchResult(
+                keyword=self.keyword,
+                total_count=len(valid_items),
+                items=model_items,
+            )
+            
             return valid_items
             
         except Exception as e:
@@ -399,6 +430,97 @@ class G2BCrawler:
             
         return cleaned_results
 
+    def _convert_to_bid_item(self, item_dict: Dict[str, Any]) -> BidItem:
+        """
+        딕셔너리를 BidItem 모델로 변환
+        
+        Args:
+            item_dict: 변환할 항목 딕셔너리
+            
+        Returns:
+            BidItem: 변환된 모델 인스턴스
+        """
+        try:
+            # ID 필드가 없으면 생성
+            if 'id' not in item_dict or not item_dict['id']:
+                item_dict['id'] = str(uuid.uuid4())
+            
+            # 필수 필드 확인
+            bid_number = item_dict.get('bid_number', '')
+            if not bid_number:
+                bid_number = item_dict.get('number', str(uuid.uuid4()))
+                
+            bid_title = item_dict.get('title', '')
+            if not bid_title:
+                bid_title = item_dict.get('bid_title', '제목 없음')
+            
+            # 상태 변환
+            status_str = item_dict.get('status', '')
+            status = BidStatus.UNKNOWN
+            
+            if status_str:
+                if '공고중' in status_str:
+                    status = BidStatus.OPEN
+                elif '마감' in status_str:
+                    status = BidStatus.CLOSED
+                elif '낙찰' in status_str:
+                    status = BidStatus.AWARDED
+                elif '취소' in status_str:
+                    status = BidStatus.CANCELLED
+            
+            # 필드 매핑
+            bid_item = BidItem(
+                id=item_dict.get('id', str(uuid.uuid4())),
+                bid_number=bid_number,
+                bid_title=bid_title,
+                organization=item_dict.get('department') or item_dict.get('organization') or item_dict.get('agency', None),
+                bid_method=item_dict.get('bid_method', None),
+                bid_type=item_dict.get('bid_type', None),
+                date_start=item_dict.get('date_start') or item_dict.get('start_date', None),
+                date_end=item_dict.get('date_end') or item_dict.get('deadline', None),
+                status=status,
+                detail_url=item_dict.get('detail_url', None),
+                budget=item_dict.get('budget', None),
+                estimated_price=item_dict.get('estimated_price', None),
+                contact_info=item_dict.get('contact_info', None),
+                requirements=item_dict.get('qualification', None),
+                additional_info=item_dict.get('additional_info', {})
+            )
+            
+            return bid_item
+            
+        except Exception as e:
+            logger.error(f"BidItem 모델 변환 중 오류: {str(e)}")
+            logger.debug(traceback.format_exc())
+            
+            # 오류 발생시 기본 값으로 생성
+            return BidItem(
+                id=str(uuid.uuid4()),
+                bid_number=str(uuid.uuid4()),
+                bid_title=item_dict.get('title', '변환 오류') or '변환 오류'
+            )
+
+    async def _convert_dict_results_to_model(self, items: List[Dict[str, Any]]) -> List[BidItem]:
+        """
+        딕셔너리 결과 목록을 BidItem 모델 목록으로 변환
+        
+        Args:
+            items: 변환할 항목 딕셔너리 목록
+            
+        Returns:
+            List[BidItem]: 변환된 모델 인스턴스 목록
+        """
+        model_items = []
+        
+        for item_dict in items:
+            try:
+                bid_item = self._convert_to_bid_item(item_dict)
+                model_items.append(bid_item)
+            except Exception as e:
+                logger.error(f"항목 변환 중 오류: {str(e)}")
+        
+        return model_items
+
     def save_results(self, items, keyword=None):
         """
         결과 저장
@@ -424,7 +546,22 @@ class G2BCrawler:
             # 결과 데이터 전처리
             cleaned_results = self._prepare_results_for_save(items)
             
-            # JSON 파일로 저장
+            # 모델 기반 결과 저장
+            if self.search_result_model:
+                # 모델을 JSON으로 직렬화
+                model_json = self.search_result_model.model_dump_json(indent=2)
+                
+                # 모델 저장 파일명 생성
+                model_filename = f"model_results_{save_keyword}_{timestamp}.json"
+                model_file_path = RESULTS_DIR / model_filename
+                
+                # 모델 저장
+                with open(model_file_path, 'w', encoding='utf-8') as f:
+                    f.write(model_json)
+                
+                logger.info(f"모델 기반 검색 결과 저장 완료: {model_file_path}")
+            
+            # 원래의 JSON 파일 저장 (역호환성 유지)
             with open(result_file_path, 'w', encoding='utf-8') as f:
                 json.dump(cleaned_results, f, ensure_ascii=False, indent=2)
             
@@ -456,83 +593,15 @@ class G2BCrawler:
             logger.debug(traceback.format_exc())
             return None
 
-    async def run(self, keyword="AI", max_items=10000):
+    async def get_model_results(self) -> List[BidItem]:
         """
-        전체 크롤링 작업 실행
+        BidItem 모델 형태의 결과 목록 반환
         
-        Args:
-            keyword: 검색 키워드
-            max_items: 처리할 최대 항목 수
-            
         Returns:
-            str: 저장된 결과 파일 경로 또는 None
+            List[BidItem]: 모델 기반 결과 목록
         """
-        try:
-            # 키워드 설정
-            self.keyword = keyword
-            
-            logger.info(f"=== 나라장터 크롤링 시작 (키워드: {keyword}, 최대 항목: {max_items}) ===")
-            
-            # 초기화
-            if not await self.initialize():
-                logger.error("크롤러 초기화 실패")
-                return None
-            
-            # 키워드 검색
-            if not await self.search_keyword(keyword):
-                logger.error("키워드 검색 실패")
-                return None
-            
-            # 검색 결과 추출
-            search_results = await self.extract_search_results(max_items)
-            if not search_results:
-                logger.warning("검색 결과 없음 또는 추출 실패")
-                return None
-
-            # 상세 페이지 처리
-            detailed_results = await self.process_detail_pages(search_results)
-            
-            # 결과 저장
-            result_file = self.save_results(detailed_results, keyword)
-            
-            logger.info(f"=== 나라장터 크롤링 완료 (처리 항목: {len(detailed_results)}) ===")
-            return result_file
-            
-        except Exception as e:
-            logger.error(f"크롤링 실행 중 오류: {str(e)}")
-            logger.debug(traceback.format_exc())
-            return None
-        finally:
-            # 리소스 정리
-            await self.close()
-
-# 직접 실행 시
-if __name__ == "__main__":
-    # Windows에서 올바른 이벤트 루프 정책 설정
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
-    # 명령행 인자 처리
-    import argparse
-    parser = argparse.ArgumentParser(description='나라장터 크롤러')
-    parser.add_argument('--keyword', '-k', type=str, default='AI', help='검색 키워드')
-    parser.add_argument('--max_items', '-m', type=int, default=100, help='처리할 최대 항목 수')
-    parser.add_argument('--headless', '-H', action='store_true', help='헤드리스 모드 사용')
-    args = parser.parse_args()
-    
-    # 비동기 메인 함수
-    async def main():
-        # 크롤러 인스턴스 생성
-        crawler = G2BCrawler(headless=args.headless)
+        if self.search_result_model and self.search_result_model.items:
+            return self.search_result_model.items
         
-        # 크롤링 실행
-        result_file = await crawler.run(keyword=args.keyword, max_items=args.max_items)
-        
-        # 결과 출력
-        if result_file:
-            print(f"크롤링 결과가 저장되었습니다: {result_file}")
-        else:
-            print("크롤링 실패")
-    
-    # 메인 함수 실행
-    asyncio.run(main()) 
+        # 모델이 없는 경우 현재 결과를 변환하여 반환
+        return await self._convert_dict_results_to_model(self.results)

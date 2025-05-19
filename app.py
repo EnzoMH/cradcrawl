@@ -28,6 +28,8 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 from io import BytesIO
 
+from contextlib import asynccontextmanager
+
 # 로깅 설정
 logging.basicConfig(
     level=logging.DEBUG,  # 전체 로깅 레벨을 DEBUG로 변경
@@ -65,38 +67,9 @@ GEMINI_API_KEY_VALUE = "AIzaSyADr8WuYg4EBeOnQRK8gJu9luhvkz47ADY"
 os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY_VALUE
 logger.info(f"GEMINI_API_KEY 환경 변수를 직접 설정했습니다.")
 
-# .env 파일 로드 (프로젝트 루트 기준)
-try:
-    from dotenv import load_dotenv
-    try:
-        # UTF-8로 먼저 시도
-        load_dotenv(ROOT_DIR / '.env', encoding='utf-8')
-        logger.info("환경 변수 로드 성공 (UTF-8)")
-    except UnicodeDecodeError:
-        # UTF-8 디코딩 실패 시 다른 인코딩 시도
-        try:
-            load_dotenv(ROOT_DIR / '.env', encoding='cp949')
-            logger.info("환경 변수 로드 성공 (CP949)")
-        except UnicodeDecodeError:
-            try:
-                load_dotenv(ROOT_DIR / '.env', encoding='latin-1')
-                logger.info("환경 변수 로드 성공 (latin-1)")
-            except Exception as e:
-                logger.error(f".env 파일 로드 실패: {str(e)}")
-                # 환경 변수 없이 계속 진행
-    except FileNotFoundError:
-        logger.warning(".env 파일을 찾을 수 없습니다.")
-    except Exception as e:
-        logger.error(f".env 파일 로드 중 오류 발생: {str(e)}")
-except ImportError:
-    logger.warning("dotenv 패키지가 설치되어 있지 않습니다. 환경 변수를 직접 설정해주세요.")
-
-# Gemini API 설정
-DEFAULT_GEMINI_API_KEY = "AIzaSyDLe9f5i3AlKZp4eX-U8Xgop7GiO0y_Qzc"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", DEFAULT_GEMINI_API_KEY)
-if GEMINI_API_KEY == DEFAULT_GEMINI_API_KEY:
-    logger.info("환경 변수에서 GEMINI_API_KEY를 찾을 수 없어 기본값을 사용합니다.")
-elif not GEMINI_API_KEY:
+# GEMINI_API_KEY 설정 확인
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
     logger.warning("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다. API 관련 기능이 제한됩니다.")
 else:
     logger.info("GEMINI_API_KEY 환경 변수를 성공적으로 로드했습니다.")
@@ -129,11 +102,29 @@ class WebSocketManager:
     
     async def broadcast(self, message: Dict[str, Any]):
         """모든 연결된 클라이언트에 메시지 전송"""
+        # Pydantic 모델 처리를 위한 직렬화 함수
+        def serialize_models(obj):
+            if hasattr(obj, 'model_dump'):
+                # Pydantic v2
+                return obj.model_dump()
+            elif hasattr(obj, 'dict'):
+                # Pydantic v1
+                return obj.dict()
+            elif isinstance(obj, dict):
+                return {k: serialize_models(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [serialize_models(item) for item in obj]
+            else:
+                return obj
+        
+        # 메시지 내 모델 객체 직렬화
+        serialized_message = serialize_models(message)
+        
         disconnected_clients = []
         
         for client in self.active_connections:
             try:
-                await client.send_json(message)
+                await client.send_json(serialized_message)
             except Exception as e:
                 self.logger.error(f"클라이언트 메시지 전송 중 오류: {str(e)}")
                 disconnected_clients.append(client)
@@ -169,35 +160,78 @@ class WebSocketManager:
         # 데이터 구조 수정: bid_info 필드에 필요한 정보 포함
         formatted_results = []
         for item in results:
-            # 기본 정보 구성
-            bid_info = {
-                'title': item.get('title') or item.get('bid_title', ''),
-                'number': item.get('bid_number', ''),
-                'agency': item.get('department') or item.get('organization', ''),
-                'date': item.get('date_start') or item.get('start_date', ''),
-                'end_date': item.get('date_end') or item.get('deadline', ''),
-                'status': item.get('status', '공고중')
-            }
-            
-            # 항목 포맷팅
-            formatted_item = {
-                'id': item.get('id', ''),
-                'title': item.get('title') or item.get('bid_title', ''),
-                'bid_number': item.get('bid_number', ''),
-                'department': item.get('department') or item.get('organization', ''),
-                'bid_info': bid_info,
-                'details': {
-                    'contract_method': item.get('contract_method', ''),
-                    'estimated_price': item.get('estimated_price', ''),
-                    'qualification': item.get('qualification', ''),
-                    'bid_type': item.get('bid_type', ''),
-                    'contract_period': item.get('contract_period', ''),
-                    'delivery_location': item.get('delivery_location', ''),
-                    'notice': item.get('notice', '')
-                },
-                'file_attachments': item.get('file_attachments', []),
-                'detail_url': item.get('detail_url', '')
-            }
+            # BidItem 모델 인스턴스인 경우 모델 데이터 사용
+            if hasattr(item, 'model_dump'):
+                # Pydantic 모델을 딕셔너리로 변환
+                item_dict = item.model_dump()
+                
+                # 기본 정보 구성
+                bid_info = {
+                    'title': item_dict.get('bid_title', ''),
+                    'number': item_dict.get('bid_number', ''),
+                    'agency': item_dict.get('organization', ''),
+                    'date': item_dict.get('date_start', ''),
+                    'end_date': item_dict.get('date_end', ''),
+                    'status': item_dict.get('status', 'UNKNOWN')
+                }
+                
+                # 항목 포맷팅 - models.py의 BidItem 클래스 필드와 일치하도록 수정
+                formatted_item = {
+                    'id': item_dict.get('id', ''),
+                    'title': item_dict.get('bid_title', ''),
+                    'bid_number': item_dict.get('bid_number', ''),
+                    'department': item_dict.get('organization', ''),
+                    'bid_info': bid_info,
+                    'details': {
+                        # contract_method를 bid_method로 매핑 (models.py와 일치)
+                        'contract_method': item_dict.get('bid_method', ''),
+                        'estimated_price': item_dict.get('estimated_price', ''),
+                        # qualification을 requirements로 매핑 (models.py와 일치)
+                        'qualification': item_dict.get('requirements', ''),
+                        'bid_type': item_dict.get('bid_type', ''),
+                        # additional_info에서 필요한 정보 추출
+                        'contract_period': item_dict.get('additional_info', {}).get('contract_period', ''),
+                        'delivery_location': item_dict.get('additional_info', {}).get('delivery_location', ''),
+                        'notice': item_dict.get('additional_info', {}).get('notice', '')
+                    },
+                    'file_attachments': item_dict.get('additional_info', {}).get('file_attachments', []),
+                    'detail_url': item_dict.get('detail_url', '')
+                }
+            else:
+                # 기존 딕셔너리 처리 방식 (이전 버전과의 호환성)
+                # 기본 정보 구성
+                bid_info = {
+                    'title': item.get('title') or item.get('bid_title', ''),
+                    'number': item.get('bid_number', ''),
+                    'agency': item.get('department') or item.get('organization', ''),
+                    'date': item.get('date_start') or item.get('start_date', ''),
+                    'end_date': item.get('date_end') or item.get('deadline', ''),
+                    'status': item.get('status', '공고중')
+                }
+                
+                # 항목 포맷팅 - 필드 매핑 수정
+                formatted_item = {
+                    'id': item.get('id', ''),
+                    'title': item.get('title') or item.get('bid_title', ''),
+                    'bid_number': item.get('bid_number', ''),
+                    'department': item.get('department') or item.get('organization', ''),
+                    'bid_info': bid_info,
+                    'details': {
+                        # contract_method -> bid_method 매핑 추가
+                        'contract_method': item.get('contract_method', '') or item.get('bid_method', ''),
+                        'estimated_price': item.get('estimated_price', ''),
+                        # qualification -> requirements 매핑 추가 
+                        'qualification': item.get('qualification', '') or item.get('requirements', ''),
+                        'bid_type': item.get('bid_type', ''),
+                        'contract_period': item.get('contract_period', ''),
+                        'delivery_location': item.get('delivery_location', ''),
+                        'notice': item.get('notice', '')
+                    },
+                    # file_attachments와 detail_url을 추가 정보에서도 확인
+                    'file_attachments': item.get('file_attachments', []) or 
+                                    (item.get('additional_info', {}) or {}).get('file_attachments', []),
+                    'detail_url': item.get('detail_url', '')
+                }
             
             formatted_results.append(formatted_item)
         
@@ -261,9 +295,20 @@ class CrawlingState:
             "results": self.results
         }
         
-        # JSON으로 저장
+        # 커스텀 JSON 인코더 클래스 정의
+        class ModelEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if hasattr(obj, 'model_dump'):
+                    # Pydantic v2
+                    return obj.model_dump()
+                elif hasattr(obj, 'dict'):
+                    # Pydantic v1
+                    return obj.dict()
+                return super().default(obj)
+        
+        # JSON으로 저장 (커스텀 인코더 사용)
         with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, ensure_ascii=False, indent=2)
+            json.dump(save_data, f, ensure_ascii=False, indent=2, cls=ModelEncoder)
         
         self.logger.info(f"결과 저장 완료: {filepath} ({len(self.results)}건)")
         return str(filepath)
@@ -271,11 +316,36 @@ class CrawlingState:
 # 크롤링 상태 인스턴스 생성
 crawling_state = CrawlingState()
 
-# FastAPI 앱 생성
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    애플리케이션 라이프스팬 컨텍스트 매니저
+    - 시작 시 필요한 초기화 작업 수행
+    - 종료 시 정리 작업 수행
+    """
+    # 시작 시 실행할 코드
+    logger.info("=== 나라장터 크롤링 애플리케이션 시작 ===")
+    
+    # 결과 디렉토리 생성
+    RESULTS_DIR.mkdir(exist_ok=True)
+    
+    try:
+        # 컨텍스트 내부로 제어 양도
+        yield
+    finally:
+        # 종료 시 실행할 코드
+        logger.info("=== 나라장터 크롤링 애플리케이션 종료 ===")
+        
+        # 실행 중인 크롤러가 있으면 종료
+        if hasattr(crawling_state, 'crawler') and crawling_state.crawler:
+            await crawling_state.crawler.close()
+
+# FastAPI 앱 생성 부분 수정
 app = FastAPI(
     title="나라장터 크롤링 API",
     description="국가종합전자조달 나라장터 웹사이트에서 입찰공고 정보를 수집하는 API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan  # 라이프스팬 설정 추가
 )
 
 # CORS 설정
@@ -321,45 +391,105 @@ async def get_status():
 @app.get("/api/results")
 async def get_results():
     """현재까지 수집된 결과 조회"""
-    # 데이터 구조 수정: bid_info 필드에 필요한 정보 포함
-    formatted_results = []
-    for item in crawling_state.results:
-        # 기본 정보 구성
-        bid_info = {
-            'title': item.get('title') or item.get('bid_title', ''),
-            'number': item.get('bid_number', ''),
-            'agency': item.get('department') or item.get('organization', ''),
-            'date': item.get('date_start') or item.get('start_date', ''),
-            'end_date': item.get('date_end') or item.get('deadline', ''),
-            'status': item.get('status', '공고중')
-        }
+    try:
+        # 모델 기반 결과가 있는지 확인
+        model_based_results = []
+        if crawling_state.crawler:
+            model_based_results = await crawling_state.crawler.get_model_results()
         
-        # 항목 포맷팅
-        formatted_item = {
-            'id': item.get('id', ''),
-            'title': item.get('title') or item.get('bid_title', ''),
-            'bid_number': item.get('bid_number', ''),
-            'department': item.get('department') or item.get('organization', ''),
-            'bid_info': bid_info,
-            'details': {
-                'contract_method': item.get('contract_method', ''),
-                'estimated_price': item.get('estimated_price', ''),
-                'qualification': item.get('qualification', ''),
-                'bid_type': item.get('bid_type', ''),
-                'contract_period': item.get('contract_period', ''),
-                'delivery_location': item.get('delivery_location', ''),
-                'notice': item.get('notice', '')
-            },
-            'file_attachments': item.get('file_attachments', []),
-            'detail_url': item.get('detail_url', '')
-        }
+        # 모델 기반 결과가 있으면 사용, 없으면 기존 결과 사용
+        results_to_format = model_based_results if model_based_results else crawling_state.results
         
-        formatted_results.append(formatted_item)
-    
-    return {
-        "status": "success",
-        "results": formatted_results
-    }
+        # 데이터 구조 수정: bid_info 필드에 필요한 정보 포함
+        formatted_results = []
+        for item in results_to_format:
+            # BidItem 모델 인스턴스인 경우 모델 데이터 사용
+            if hasattr(item, 'model_dump'):
+                # Pydantic 모델을 딕셔너리로 변환
+                item_dict = item.model_dump()
+                
+                # 기본 정보 구성
+                bid_info = {
+                    'title': item_dict.get('bid_title', ''),
+                    'number': item_dict.get('bid_number', ''),
+                    'agency': item_dict.get('organization', ''),
+                    'date': item_dict.get('date_start', ''),
+                    'end_date': item_dict.get('date_end', ''),
+                    'status': item_dict.get('status', 'UNKNOWN')
+                }
+                
+                # 항목 포맷팅
+                formatted_item = {
+                    'id': item_dict.get('id', ''),
+                    'title': item_dict.get('bid_title', ''),
+                    'bid_number': item_dict.get('bid_number', ''),
+                    'department': item_dict.get('organization', ''),
+                    'bid_info': bid_info,
+                    'details': {
+                        'contract_method': item_dict.get('bid_method', ''),
+                        'estimated_price': item_dict.get('estimated_price', ''),
+                        'qualification': item_dict.get('requirements', ''),
+                        'bid_type': item_dict.get('bid_type', ''),
+                        'contract_period': item_dict.get('additional_info', {}).get('contract_period', ''),
+                        'delivery_location': item_dict.get('additional_info', {}).get('delivery_location', ''),
+                        'notice': item_dict.get('additional_info', {}).get('notice', '')
+                    },
+                    'file_attachments': item_dict.get('additional_info', {}).get('file_attachments', []),
+                    'detail_url': item_dict.get('detail_url', '')
+                }
+            else:
+                # 기존 딕셔너리 처리 방식 (이전 버전과의 호환성)
+                # 기본 정보 구성
+                bid_info = {
+                    'title': item.get('title') or item.get('bid_title', ''),
+                    'number': item.get('bid_number', ''),
+                    'agency': item.get('department') or item.get('organization', ''),
+                    'date': item.get('date_start') or item.get('start_date', ''),
+                    'end_date': item.get('date_end') or item.get('deadline', ''),
+                    'status': item.get('status', '공고중')
+                }
+                
+                # 항목 포맷팅
+                formatted_item = {
+                    'id': item.get('id', ''),
+                    'title': item.get('title') or item.get('bid_title', ''),
+                    'bid_number': item.get('bid_number', ''),
+                    'department': item.get('department') or item.get('organization', ''),
+                    'bid_info': bid_info,
+                    'details': {
+                        'contract_method': item.get('contract_method', ''),
+                        'estimated_price': item.get('estimated_price', ''),
+                        'qualification': item.get('qualification', ''),
+                        'bid_type': item.get('bid_type', ''),
+                        'contract_period': item.get('contract_period', ''),
+                        'delivery_location': item.get('delivery_location', ''),
+                        'notice': item.get('notice', '')
+                    },
+                    'file_attachments': item.get('file_attachments', []),
+                    'detail_url': item.get('detail_url', '')
+                }
+            
+            formatted_results.append(formatted_item)
+        
+        # 결과 직렬화를 위한 커스텀 인코더
+        class ModelEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if hasattr(obj, 'model_dump'):
+                    return obj.model_dump()
+                elif hasattr(obj, 'dict'):
+                    return obj.dict()
+                return super().default(obj)
+        
+        return {
+            "status": "success",
+            "results": json.loads(json.dumps(formatted_results, cls=ModelEncoder))
+        }
+    except Exception as e:
+        logger.error(f"결과 조회 중 오류: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"결과 조회 중 오류가 발생했습니다: {str(e)}"
+        }
 
 @app.post("/api/start")
 async def start_crawling(request: Dict[str, Any], background_tasks: BackgroundTasks):
@@ -450,36 +580,78 @@ async def download_results():
         return {"status": "error", "message": "다운로드할 결과가 없습니다."}
     
     try:
+        # 모델 기반 결과가 있는지 확인
+        model_based_results = []
+        if crawling_state.crawler:
+            model_based_results = await crawling_state.crawler.get_model_results()
+        
+        # 모델 기반 결과가 있으면 사용, 없으면 기존 결과 사용
+        results_to_format = model_based_results if model_based_results else crawling_state.results
+        
         # 포맷팅된 결과 데이터 생성
         formatted_results = []
-        for item in crawling_state.results:
-            # 기본 정보 구성
-            bid_info = {
-                'title': item.get('title') or item.get('bid_title', ''),
-                'number': item.get('bid_number', ''),
-                'agency': item.get('department') or item.get('organization', ''),
-                'date': item.get('date_start') or item.get('start_date', ''),
-                'end_date': item.get('date_end') or item.get('deadline', ''),
-                'status': item.get('status', '공고중')
-            }
-            
-            # 엑셀용 평탄화된 데이터 구조
-            flat_item = {
-                '번호': item.get('id', ''),
-                '공고명': item.get('title') or item.get('bid_title', ''),
-                '공고번호': item.get('bid_number', ''),
-                '공고기관': item.get('department') or item.get('organization', ''),
-                '공고일': bid_info['date'],
-                '마감일': bid_info['end_date'],
-                '상태': bid_info['status'],
-                '계약방식': item.get('contract_method', ''),
-                '추정가격': item.get('estimated_price', ''),
-                '참가자격': item.get('qualification', ''),
-                '입찰방식': item.get('bid_type', ''),
-                '계약기간': item.get('contract_period', ''),
-                '납품장소': item.get('delivery_location', ''),
-                '상세URL': item.get('detail_url', '')
-            }
+        for item in results_to_format:
+            # BidItem 모델 인스턴스인 경우 모델 데이터 사용
+            if hasattr(item, 'model_dump'):
+                # Pydantic 모델을 딕셔너리로 변환
+                item_dict = item.model_dump()
+                
+                # 기본 정보 구성
+                bid_info = {
+                    'title': item_dict.get('bid_title', ''),
+                    'number': item_dict.get('bid_number', ''),
+                    'agency': item_dict.get('organization', ''),
+                    'date': item_dict.get('date_start', ''),
+                    'end_date': item_dict.get('date_end', ''),
+                    'status': item_dict.get('status', 'UNKNOWN')
+                }
+                
+                # 엑셀용 평탄화된 데이터 구조
+                flat_item = {
+                    '번호': item_dict.get('id', ''),
+                    '공고명': item_dict.get('bid_title', ''),
+                    '공고번호': item_dict.get('bid_number', ''),
+                    '공고기관': item_dict.get('organization', ''),
+                    '공고일': item_dict.get('date_start', ''),
+                    '마감일': item_dict.get('date_end', ''),
+                    '상태': item_dict.get('status', 'UNKNOWN'),
+                    '계약방식': item_dict.get('bid_method', ''),
+                    '추정가격': item_dict.get('estimated_price', ''),
+                    '참가자격': item_dict.get('requirements', ''),
+                    '입찰방식': item_dict.get('bid_type', ''),
+                    '계약기간': item_dict.get('additional_info', {}).get('contract_period', ''),
+                    '납품장소': item_dict.get('additional_info', {}).get('delivery_location', ''),
+                    '상세URL': item_dict.get('detail_url', '')
+                }
+            else:
+                # 기존 방식 유지 (이전 버전과의 호환성)
+                # 기본 정보 구성
+                bid_info = {
+                    'title': item.get('title') or item.get('bid_title', ''),
+                    'number': item.get('bid_number', ''),
+                    'agency': item.get('department') or item.get('organization', ''),
+                    'date': item.get('date_start') or item.get('start_date', ''),
+                    'end_date': item.get('date_end') or item.get('deadline', ''),
+                    'status': item.get('status', '공고중')
+                }
+                
+                # 엑셀용 평탄화된 데이터 구조
+                flat_item = {
+                    '번호': item.get('id', ''),
+                    '공고명': item.get('title') or item.get('bid_title', ''),
+                    '공고번호': item.get('bid_number', ''),
+                    '공고기관': item.get('department') or item.get('organization', ''),
+                    '공고일': bid_info['date'],
+                    '마감일': bid_info['end_date'],
+                    '상태': bid_info['status'],
+                    '계약방식': item.get('contract_method', ''),
+                    '추정가격': item.get('estimated_price', ''),
+                    '참가자격': item.get('qualification', ''),
+                    '입찰방식': item.get('bid_type', ''),
+                    '계약기간': item.get('contract_period', ''),
+                    '납품장소': item.get('delivery_location', ''),
+                    '상세URL': item.get('detail_url', '')
+                }
             
             formatted_results.append(flat_item)
         
@@ -640,14 +812,28 @@ async def run_crawling(keywords: List[str], headless: bool = True, start_date: O
                             break
                             
                         try:
-                            await crawling_state.websocket_manager.send_log(f"항목 {idx+1}/{result_count} 상세 정보 추출 중: {item['title']}")
+                            # 타이틀 정보 추출 (딕셔너리 또는 BidItem 모델에서)
+                            title = item.get('title', '') if isinstance(item, dict) else getattr(item, 'bid_title', '')
+                            await crawling_state.websocket_manager.send_log(f"항목 {idx+1}/{result_count} 상세 정보 추출 중: {title}")
                             
                             # 상세 페이지 처리
                             detail_data = await crawler.process_detail_page(item)
                             
                             if detail_data:
                                 # 상세 정보 병합
-                                item.update(detail_data)
+                                if isinstance(item, dict):
+                                    item.update(detail_data)
+                                else:
+                                    # BidItem 모델 업데이트
+                                    for key, value in detail_data.items():
+                                        if hasattr(item, key):
+                                            setattr(item, key, value)
+                                        elif hasattr(item, 'additional_info'):
+                                            # additional_info에 저장
+                                            if item.additional_info is None:
+                                                item.additional_info = {}
+                                            item.additional_info[key] = value
+                                
                                 await crawling_state.websocket_manager.send_log(f"항목 {idx+1} 상세 정보 추출 성공", "success")
                             else:
                                 await crawling_state.websocket_manager.send_log(f"항목 {idx+1} 상세 정보 추출 실패", "warning")
@@ -659,6 +845,15 @@ async def run_crawling(keywords: List[str], headless: bool = True, start_date: O
                             detailed_items.append(item)  # 기본 정보만 추가
                     
                     await crawling_state.websocket_manager.send_log(f"상세 정보 추출 완료: {len(detailed_items)}개 항목")
+                    
+                    # 모델 기반 결과 가져오기
+                    try:
+                        model_items = await crawler.get_model_results()
+                        if model_items and len(model_items) > 0:
+                            await crawling_state.websocket_manager.send_log(f"모델 기반 결과 {len(model_items)}개 항목 추가", "success")
+                            detailed_items = model_items
+                    except Exception as model_err:
+                        await crawling_state.websocket_manager.send_log(f"모델 기반 결과 변환 오류 (무시하고 계속 진행): {str(model_err)}", "warning")
                     
                     # 결과를 전체 결과에 추가
                     for result in detailed_items:
@@ -714,20 +909,6 @@ async def run_crawling(keywords: List[str], headless: bool = True, start_date: O
         await crawling_state.websocket_manager.send_status(crawling_state.get_status())
         await crawling_state.websocket_manager.send_log("크롤링 작업이 완료되었습니다.")
 
-# 애플리케이션 시작 이벤트
-@app.on_event("startup")
-async def startup_event():
-    logger.info("=== 나라장터 크롤링 애플리케이션 시작 ===")
-    # 결과 디렉토리 생성
-    RESULTS_DIR.mkdir(exist_ok=True)
-
-# 애플리케이션 종료 이벤트
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("=== 나라장터 크롤링 애플리케이션 종료 ===")
-    # 실행 중인 크롤러가 있으면 종료
-    if crawling_state.crawler:
-        await crawling_state.crawler.close()
 
 # 직접 실행 시 서버 시작
 if __name__ == "__main__":

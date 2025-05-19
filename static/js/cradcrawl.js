@@ -254,32 +254,44 @@ document.addEventListener('DOMContentLoaded', function() {
                 // 입찰 정보 추출
                 const bidInfo = item.bid_info || {};
                 
+                // 기본 정보가 없을 경우 대체값 설정
+                const title = bidInfo.title || item.title || item.bid_title || '제목 없음';
+                const agency = bidInfo.agency || item.department || item.organization || '-';
+                const startDate = bidInfo.date || item.date_start || item.start_date || '-';
+                const endDate = bidInfo.end_date || item.date_end || item.deadline || '-';
+                const status = bidInfo.status || item.status || '알 수 없음';
+                
                 // 상태 클래스 결정
-                let statusClass = '';
-                switch(bidInfo.status) {
-                    case '입찰':
+                let statusClass = 'badge bg-secondary';
+                let statusText = status;
+                
+                // 상태값에 따른 스타일 적용
+                if (typeof status === 'string') {
+                    if (status.includes('공고중') || status === 'OPEN') {
                         statusClass = 'badge bg-primary';
-                        break;
-                    case '개찰':
-                        statusClass = 'badge bg-success';
-                        break;
-                    case '마감':
+                        statusText = '공고중';
+                    } else if (status.includes('마감') || status === 'CLOSED') {
                         statusClass = 'badge bg-danger';
-                        break;
-                    default:
-                        statusClass = 'badge bg-secondary';
+                        statusText = '마감';
+                    } else if (status.includes('낙찰') || status === 'AWARDED') {
+                        statusClass = 'badge bg-success';
+                        statusText = '낙찰';
+                    } else if (status.includes('취소') || status === 'CANCELLED') {
+                        statusClass = 'badge bg-warning';
+                        statusText = '취소';
+                    }
                 }
                 
                 return `
                     <tr data-index="${index}" class="result-row">
                         <td>${index + 1}</td>
                         <td>
-                            <a href="#" class="detail-link" data-index="${index}">${bidInfo.title || '제목 없음'}</a>
+                            <a href="#" class="detail-link" data-index="${index}">${title}</a>
                         </td>
-                        <td>${bidInfo.agency || '-'}</td>
-                        <td>${bidInfo.date || '-'}</td>
-                        <td>${bidInfo.end_date || '-'}</td>
-                        <td><span class="${statusClass}">${bidInfo.status || '알 수 없음'}</span></td>
+                        <td>${agency}</td>
+                        <td>${startDate}</td>
+                        <td>${endDate}</td>
+                        <td><span class="${statusClass}">${statusText}</span></td>
                     </tr>
                 `;
             }).join('');
@@ -469,19 +481,26 @@ document.addEventListener('DOMContentLoaded', function() {
         // 상세 정보
         const details = result.details || {};
         
-        // 모달 제목 설정
-        elements.detailModalTitle.textContent = result.title || bidInfo.title || '상세 정보';
+        // 모든 가능한 필드를 체크하여 최선의 값 사용
+        const title = bidInfo.title || result.title || result.bid_title || '상세 정보';
+        const bidNumber = result.bid_number || bidInfo.number || '-';
+        const department = result.department || bidInfo.agency || result.organization || '-';
+        const startDate = bidInfo.date || result.date_start || result.start_date || '-';
+        const endDate = bidInfo.end_date || result.date_end || result.deadline || '-';
         
-        // 계약 정보 (process_detail_page에서 추출한 정보)
-        const contractMethod = result.contract_method || details.contract_method || '-';
+        // 상세 정보 필드 병합
+        const contractMethod = result.contract_method || details.contract_method || result.bid_method || '-';
         const estimatedPrice = result.estimated_price || details.estimated_price || '-';
-        const qualification = result.qualification || details.qualification || '-';
+        const qualification = result.qualification || details.qualification || result.requirements || '-';
         const bidType = result.bid_type || details.bid_type || '-';
         const contractPeriod = result.contract_period || details.contract_period || '-';
         const deliveryLocation = result.delivery_location || details.delivery_location || '-';
         
         // 파일 첨부 정보
         const fileAttachments = result.file_attachments || [];
+        
+        // 모달 제목 설정
+        elements.detailModalTitle.textContent = title;
         
         // 상세 내용 구성
         const content = `
@@ -490,19 +509,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 <table class="table table-bordered">
                     <tr>
                         <th style="width: 30%">공고번호</th>
-                        <td>${result.bid_number || bidInfo.number || '-'}</td>
+                        <td>${bidNumber}</td>
                     </tr>
                     <tr>
                         <th>공고기관</th>
-                        <td>${result.department || bidInfo.agency || '-'}</td>
+                        <td>${department}</td>
                     </tr>
                     <tr>
                         <th>공고일자</th>
-                        <td>${bidInfo.date || '-'}</td>
+                        <td>${startDate}</td>
                     </tr>
                     <tr>
                         <th>마감일자</th>
-                        <td>${result.deadline || bidInfo.end_date || '-'}</td>
+                        <td>${endDate}</td>
                     </tr>
                     <tr>
                         <th>계약방식</th>

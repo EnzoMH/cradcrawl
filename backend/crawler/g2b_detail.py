@@ -90,17 +90,7 @@ class G2BDetailProcessor:
                 logger.info("오류 복구: 브라우저 뒤로가기 실행")
             except Exception as back_error:
                 logger.error(f"뒤로가기 실패: {str(back_error)}")
-                
-                # 입찰 목록 페이지로 다시 이동 시도
-                try:
-                    logger.info("목록 페이지로 직접 이동 시도")
-                    self.driver.get("https://www.g2b.go.kr:8101/ep/tbid/tbidList.do?taskClCd=5")
-                    await asyncio.sleep(3)
-                except Exception as nav_error:
-                    logger.error(f"목록 페이지 이동 실패: {str(nav_error)}")
-            
-            return None
-            
+                      
     async def _extract_detail_data(self):
         """
         상세 페이지에서 데이터 추출
