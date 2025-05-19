@@ -63,7 +63,7 @@ RESULTS_DIR = ROOT_DIR / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 # 직접 환경 변수 설정 (지정된 API 키)
-GEMINI_API_KEY_VALUE = "AIzaSyADr8WuYg4EBeOnQRK8gJu9luhvkz47ADY"
+GEMINI_API_KEY_VALUE = ""
 os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY_VALUE
 logger.info(f"GEMINI_API_KEY 환경 변수를 직접 설정했습니다.")
 
